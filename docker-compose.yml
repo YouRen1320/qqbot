@@ -1,0 +1,53 @@
+services:
+  # QQ 协议端（NapCat）—— 首次启动后浏览器打开 http://服务器IP:6099 扫码登录
+  # WebUI token 在首次启动后自动生成，见容器日志或 napcat/config/webui.json
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: qqbot-napcat
+    restart: always
+    environment:
+      - NAPCAT_UID=0
+      - NAPCAT_GID=0
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./napcat/config:/app/napcat/config
+      - ./napcat/QQ:/app/.config/QQ
+    ports:
+      - "6099:6099"   # NapCat WebUI（扫码登录用，登录后可关闭）
+
+  # NoneBot2 机器人主体
+  nonebot:
+    build:
+      context: .
+      args:
+        # 中国用户取消注释下一行以加速构建
+        # USE_CN_MIRROR: "true"
+        USE_CN_MIRROR: "false"
+    container_name: qqbot-nonebot
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+    env_file:
+      - .env
+    volumes:
+      - ./plugins:/app/plugins
+      - ./data:/app/data
+    mem_limit: 400m
+    memswap_limit: 800m
+    # 端口不需要暴露到宿主机 — NapCat 通过 Docker 内部网络直连
+    # 如需调试可取消注释：
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+
+  # 抖音/TikTok 视频解析（可选，不需要可注释掉整个 service）
+  # 项目: github.com/Evil0ctal/Douyin_TikTok_Download_API
+  douyin-api:
+    image: evil0ctal/douyin_tiktok_download_api:latest
+    container_name: qqbot-douyin-api
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+    mem_limit: 300m
+    # 如需自定义抖音 cookies，取消下面的注释并配置 config.yaml
+    # volumes:
+    #   - ./douyin_api/config.yaml:/app/crawlers/douyin/web/config.yaml:ro
