@@ -2,7 +2,7 @@
 
 基于 [NoneBot2](https://nonebot.dev/) + [NapCat](https://github.com/NapNeko/NapCatQQ) 的 QQ 群聊 AI 机器人。
 
-有性格、有记忆、会看图、会解析视频、能管群、偶尔还会主动插话。开箱即用，`docker compose up` 一条命令部署。
+有性格、有记忆、会看图、会解析视频、能管群、偶尔还会主动插话。完成必要配置后，可用 `docker compose up -d` 启动。
 
 ## 功能
 
@@ -32,7 +32,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/你的用户名/qqbot.git
+git clone https://github.com/YouRen1320/qqbot.git
 cd qqbot
 
 # 2. 创建数据目录
@@ -62,6 +62,23 @@ docker compose logs napcat | grep -i token
 ```
 
 登录成功后 bot 即上线，在 `ENABLED_GROUPS` 配置的群里 @它 试试。
+
+### 必填与可选配置
+
+首次启动前，至少需要完成以下配置：
+
+| 配置 | 是否必填 | 用途 |
+|------|----------|------|
+| `ONEBOT_ACCESS_TOKEN` | 必填 | NoneBot 与 NapCat 之间的连接鉴权；两处必须一致 |
+| `AI_PRIMARY_API_KEY` / `AI_PRIMARY_BASE_URL` | 必填 | 主聊天模型凭据与兼容接口地址 |
+| `ENABLED_GROUPS` | 必填 | 群白名单；留空时 bot 不在任何群响应 |
+| `ADMIN_QQ` | 建议填写 | 私聊管理命令与高风险群管理工具的唯一授权账号 |
+| `AI_FALLBACK_*` | 可选 | 主模型失败时自动降级；留空时不启用备用模型 |
+| `IMAGE_GEN_*` | 可选 | AI 生图；留空时相关能力不可用 |
+| `SEARCH_API_KEY` | 可选 | 联网搜索；留空时相关能力不可用 |
+| `ANTHROPIC_API_KEY` | 可选 | AI 自维护；留空时自维护命令和定时巡逻均不启用 |
+
+不要提交 `.env`、QQ 登录数据或运行时数据库；这些路径已经加入 `.gitignore`。
 
 ### 查看日志
 
@@ -135,7 +152,9 @@ NapCat 是 QQ 协议实现，负责收发 QQ 消息。关键配置：
 
 ## 安全说明
 
-- **AI 自维护**（`self_maintain.py`）允许 Claude 读取日志和修改 `plugins/chat/` 下的代码。安全措施：白名单/黑名单路径限制、自动备份、Python 语法检查、60 秒无心跳自动回滚。需要 `ANTHROPIC_API_KEY`，不配置则完全禁用。
+- **AI 自维护**（`self_maintain.py`）允许 Claude 读取日志和修改 `plugins/chat/` 下的代码。安全措施：严格相对路径白名单、自动备份、Python 语法检查、精确变更清单，以及宿主机 90 秒未恢复连接时自动回滚。需要 `ANTHROPIC_API_KEY`，不配置则完全禁用。
+
+如需启用自动提交和故障回滚，还要把 `scripts/maintain_watchdog.sh` 部署到宿主机并加入每分钟执行的 cron。脚本默认项目路径是 `/root/qqbot/nonebot`；实际路径不同时，请先修改脚本顶部的 `ROOT`，再按脚本注释中的命令安装。升级本仓库后也应同步更新宿主机上的脚本。
 - **敏感词黑名单**（`plugins/chat/data/sensitive_words.txt`）来源于 [konsheng/Sensitive-lexicon](https://github.com/konsheng/Sensitive-lexicon)（MIT），可根据需要自行增删。
 
 ## 常见问题
@@ -162,6 +181,17 @@ NapCat 是 QQ 协议实现，负责收发 QQ 消息。关键配置：
 - AI 生图：`.env` 里不填 `IMAGE_GEN_API_KEY`
 - 联网搜索：`.env` 里不填 `SEARCH_API_KEY`
 - AI 自维护：`.env` 里不填 `ANTHROPIC_API_KEY`
+
+## 本地检查
+
+项目使用 Python 3.11。测试只覆盖本地逻辑，不连接真实 QQ、AI 模型或第三方接口：
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q bot.py plugins tests
+```
+
+GitHub Actions 会在提交到 `main` 或发起 Pull Request 时自动执行相同检查。
 
 ## 致谢
 

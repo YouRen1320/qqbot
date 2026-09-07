@@ -81,19 +81,37 @@ try:
 except Exception as e:
     print(f"  pending read failed: {e}")
     sys.exit(1)
-files = info.get("files", [])
-backups = info.get("backups", [])
 restored = []
-for f, b in zip(files, backups):
-    target = os.path.join(ROOT, f)
-    bak = os.path.join(BACKUP_DIR, b)
-    if os.path.exists(bak):
-        shutil.copy2(bak, target)
-        restored.append(f)
-        print(f"  restored {f} <- {b}")
-    else:
-        print(f"  BAK MISSING: {bak}")
-print(f"  total restored: {len(restored)} / {len(files)}")
+changes = info.get("changes")
+if isinstance(changes, list) and changes:
+    for change in reversed(changes):
+        rel = str(change.get("path") or "").lstrip("/")
+        target = os.path.join(ROOT, rel)
+        backup = change.get("backup")
+        if change.get("existed") and backup:
+            bak = os.path.join(BACKUP_DIR, backup)
+            if os.path.exists(bak):
+                shutil.copy2(bak, target)
+                restored.append(rel)
+                print(f"  restored {rel} <- {backup}")
+            else:
+                print(f"  BAK MISSING: {bak}")
+        elif not change.get("existed") and os.path.exists(target):
+            os.remove(target)
+            restored.append(rel)
+            print(f"  removed newly-created {rel}")
+else:
+    # 兼容升级前产生的旧清单。
+    files = info.get("files", [])
+    backups = info.get("backups", [])
+    for rel, backup in zip(files, backups):
+        target = os.path.join(ROOT, rel)
+        bak = os.path.join(BACKUP_DIR, backup)
+        if os.path.exists(bak):
+            shutil.copy2(bak, target)
+            restored.append(rel)
+            print(f"  restored legacy {rel} <- {backup}")
+print(f"  total restored: {len(restored)}")
 EOF
 
 mv "$APPLY_LOG" "${APPLY_LOG}.auto_reverted.$(date +%Y%m%d_%H%M%S)"

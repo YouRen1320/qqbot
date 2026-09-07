@@ -1,0 +1,21 @@
+# 版本控制与本地开发环境
+.git
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+
+# 密钥与运行时持久化数据
+.env
+data
+logs
+napcat/QQ
+
+# 不参与机器人运行的本地文件
+.DS_Store
+.idea
+.vscode
+tests
+README.md
