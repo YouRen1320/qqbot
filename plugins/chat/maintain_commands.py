@@ -40,13 +40,18 @@ _pending_plan: Optional[dict] = None
 _pending_plan_hint: str = ""
 
 # 巡逻开关 + 状态
-_patrol_enabled: bool = True
+# 没有维护模型凭据时不注册可用入口，也不让定时巡逻产生无效调用。
+_patrol_enabled: bool = self_maintain._check_api_key()
 _last_patrol_ts: float = 0.0
 _last_patrol_issue: Optional[str] = None
 
 
 def _is_admin(event: PrivateMessageEvent) -> bool:
-    return ADMIN_QQ != "" and str(event.user_id) == ADMIN_QQ
+    return (
+        self_maintain._check_api_key()
+        and ADMIN_QQ != ""
+        and str(event.user_id) == ADMIN_QQ
+    )
 
 
 # ===== 注册命令 =====

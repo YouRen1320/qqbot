@@ -21,8 +21,7 @@ import json
 import time
 import shutil
 import asyncio
-import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from nonebot.log import logger
@@ -57,9 +56,7 @@ ALLOWED_FILE_PATTERNS = (
 FORBIDDEN_PATH_SUBSTRINGS = (
     ".env",
     "secret",
-    "/data/",                            # 数据库 / cookies
-    "/logs/",
-    "/__pycache__",
+    "__pycache__",
     "scripts/backup.sh",
     "scripts/safe_restart.sh",
     "docker-compose",
@@ -118,15 +115,21 @@ B. **修复模式**
 
 def _is_allowed_path(rel_path: str) -> tuple[bool, str]:
     """rel_path 是相对 /app 的路径(无前导/);返回 (allow, reason)"""
-    p = rel_path.lstrip("/")
+    raw = rel_path.strip()
+    path = PurePosixPath(raw)
+    if not raw or raw.startswith("/") or "\\" in raw or ".." in path.parts:
+        return False, f"路径 '{raw}' 不是安全的相对路径"
+    p = path.as_posix()
+    if p.startswith(("data/", "logs/")):
+        return False, f"路径 '{p}' 属于运行时数据目录"
     # 黑名单优先
     for forbid in FORBIDDEN_PATH_SUBSTRINGS:
         if forbid in p:
             return False, f"路径 '{p}' 命中黑名单 '{forbid}'"
-    # 白名单 — 简单 glob 检查
-    if p.endswith(".py") and p.startswith("plugins/chat/"):
+    # 白名单严格限制目录层级，避免嵌套路径或路径穿越扩大可写范围。
+    if path.match("plugins/chat/*.py"):
         return True, ""
-    if p.endswith(".json") and p.startswith("plugins/chat/data/"):
+    if path.match("plugins/chat/data/*.json"):
         return True, ""
     return False, f"路径 '{p}' 不在白名单(plugins/chat/*.py / *.json)"
 
@@ -531,6 +534,7 @@ def validate_plan(plan: dict) -> tuple[bool, str]:
     if len(files) > 8:
         return False, f"一次改 {len(files)} 个文件太多, 拒"
     total_chars = 0
+    seen_paths: set[str] = set()
     for f in files:
         path = (f.get("path") or "").strip()
         new_content = f.get("new_content", "")
@@ -539,6 +543,14 @@ def validate_plan(plan: dict) -> tuple[bool, str]:
         ok, reason = _is_allowed_path(path)
         if not ok:
             return False, reason
+        normalized_path = PurePosixPath(path).as_posix()
+        if normalized_path in seen_paths:
+            return False, f"{normalized_path} 在 plan 中重复出现"
+        seen_paths.add(normalized_path)
+        try:
+            (APP_ROOT / normalized_path).resolve().relative_to(APP_ROOT.resolve())
+        except ValueError:
+            return False, f"{normalized_path} 解析后越出应用目录"
         total_chars += len(new_content)
         if len(new_content) > 80000:
             return False, f"{path} 内容 > 80k 字符, 拒"
@@ -552,6 +564,14 @@ def validate_plan(plan: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _write_apply_manifest(meta: dict) -> Path:
+    """保存可长期追踪的精确变更清单，供人工回滚读取。"""
+    _ensure_backup_dir()
+    manifest = BACKUP_DIR / f"apply-{time.time_ns()}.json"
+    manifest.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    return manifest
+
+
 def apply_fix(plan: dict, hint: str = "") -> tuple[bool, str]:
     """
     应用 plan: 备份 → 写文件 → 落 maintain_log。
@@ -561,18 +581,21 @@ def apply_fix(plan: dict, hint: str = "") -> tuple[bool, str]:
     ok, reason = validate_plan(plan)
     if not ok:
         return False, f"plan 校验失败: {reason}"
-    backups: list[str] = []
-    written: list[str] = []
+    changes: list[dict] = []
     try:
         for fitem in plan["files"]:
             rel = fitem["path"].lstrip("/")
             full = APP_ROOT / rel
+            existed = full.exists()
             bak = _backup_file(rel)
-            if bak:
-                backups.append(str(bak.relative_to(BACKUP_DIR)))
+            change = {
+                "path": rel,
+                "existed": existed,
+                "backup": str(bak.relative_to(BACKUP_DIR)) if bak else None,
+            }
+            changes.append(change)
             full.parent.mkdir(parents=True, exist_ok=True)
             full.write_text(fitem["new_content"], encoding="utf-8")
-            written.append(rel)
         # 双 flag 设计:
         # - PENDING_FLAG: bot 重启后读 → PM 主人"上线了"→ bot 自己删
         # - APPLY_LOG_FLAG: host-side watchdog 读 → git commit / 90s 无回应自动 revert
@@ -580,18 +603,24 @@ def apply_fix(plan: dict, hint: str = "") -> tuple[bool, str]:
         meta = json.dumps({
             "ts": time.time(),
             "hint": hint,
-            "files": written,
-            "backups": backups,
+            "files": [change["path"] for change in changes],
+            # 保留旧字段供尚未更新的宿主机脚本读取；精确回滚以 changes 为准。
+            "backups": [change["backup"] for change in changes if change["backup"]],
+            "changes": changes,
             "summary": plan.get("summary", ""),
             "risk": plan.get("risk", ""),
         }, ensure_ascii=False)
         PENDING_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        manifest = _write_apply_manifest(json.loads(meta))
+        meta_dict = json.loads(meta)
+        meta_dict["manifest"] = str(manifest.relative_to(BACKUP_DIR))
+        meta = json.dumps(meta_dict, ensure_ascii=False)
         PENDING_FLAG.write_text(meta)
         APPLY_LOG_FLAG.write_text(meta)
     except Exception as e:
         logger.exception("apply_fix 写文件失败")
         # 尝试回滚已写的
-        _rollback_from_backups(backups, written)
+        _rollback_changes(changes)
         return False, f"写入失败: {type(e).__name__}: {e}; 已尝试回滚"
     asyncio.create_task(
         db.maintain_log(
@@ -599,53 +628,58 @@ def apply_fix(plan: dict, hint: str = "") -> tuple[bool, str]:
             hint=hint[:200],
             verdict="written",
             cost_usd=0,
-            details=json.dumps({"files": written, "summary": plan.get("summary")},
+            details=json.dumps({"files": [c["path"] for c in changes], "summary": plan.get("summary")},
                                ensure_ascii=False)[:800],
         )
     )
-    return True, f"已写入 {len(written)} 个文件, 立即重启"
+    return True, f"已写入 {len(changes)} 个文件, 立即重启"
 
 
-def _rollback_from_backups(backups: list[str], written: list[str]) -> None:
-    """从 BACKUP_DIR 还原 N 个最近 backup 到原位置(用于 apply 失败时)"""
-    # backups 项是 BACKUP_DIR 下的相对文件名 (path_with_underscore.YYYYMMDD_HHMMSS.bak)
-    for written_path, bak_name in zip(written, backups):
-        bak_full = BACKUP_DIR / bak_name
-        if bak_full.exists():
-            shutil.copy2(bak_full, APP_ROOT / written_path)
+def _rollback_changes(changes: list[dict]) -> list[str]:
+    """按精确清单还原旧文件，并删除本次新建的文件。"""
+    restored: list[str] = []
+    for change in reversed(changes):
+        rel = str(change.get("path") or "").lstrip("/")
+        if not rel:
+            continue
+        target = APP_ROOT / rel
+        backup = change.get("backup")
+        if change.get("existed") and backup:
+            bak_full = BACKUP_DIR / str(backup)
+            if bak_full.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(bak_full, target)
+                restored.append(rel)
+        elif not change.get("existed") and target.exists():
+            target.unlink()
+            restored.append(rel)
+    return restored
 
 
 def rollback_latest() -> tuple[bool, str]:
     """
-    /回滚 命令调用:还原最近一批 apply 的备份。
-    依赖 maintain_log 里 verdict='written' 的最近一条记录的 details.
+    /回滚 命令调用:按最近一次 apply 的精确清单还原。
+    为避免误回滚历史版本，只接受 5 分钟内创建的清单。
     """
-    # 简化:从 PENDING_FLAG 或 BACKUP_DIR 里找最新的几个 .bak 文件还原
     if not BACKUP_DIR.exists():
         return False, "没有备份目录, 没法回滚"
-    baks = sorted(BACKUP_DIR.glob("*.bak"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not baks:
-        return False, "备份目录为空"
-    # 取最近 5 分钟内的备份, 视为同一次 apply
-    cutoff = time.time() - 300
-    recent_baks = [b for b in baks if b.stat().st_mtime >= cutoff]
-    if not recent_baks:
-        return False, "5 分钟内没有可回滚的备份(更老的请 SSH 进去手动 cp)"
-    restored: list[str] = []
-    for b in recent_baks:
-        # b.name 格式: plugins_chat_foo.py.20260518_233000.bak
-        # 还原成 plugins/chat/foo.py
-        stem = b.name.rsplit(".", 2)[0]  # 去掉 .ts.bak
-        rel = stem.replace("_", "/", 2)  # plugins/chat/foo.py;只换前两个_
-        # 注: 这种 naive 还原对单层文件名 OK; 复杂路径会出错。MVP 够用。
-        if "/" not in rel:
-            # 全是下划线 → 复原原文件名
-            rel = stem.replace("_", "/")
-        target = APP_ROOT / rel
-        if not target.parent.exists():
-            continue
-        shutil.copy2(b, target)
-        restored.append(rel)
+    manifests = sorted(
+        BACKUP_DIR.glob("apply-*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    if not manifests:
+        return False, "没有可用的应用清单；旧版备份请 SSH 登录后手动恢复"
+    if manifests[0].stat().st_mtime < time.time() - 300:
+        return False, "5 分钟内没有可回滚的应用清单；更早版本请 SSH 登录后手动恢复"
+    try:
+        info = json.loads(manifests[0].read_text(encoding="utf-8"))
+    except Exception as e:
+        return False, f"应用清单读取失败: {type(e).__name__}: {e}"
+    changes = info.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return False, "应用清单缺少精确变更记录"
+    restored = _rollback_changes(changes)
+    if not restored:
+        return False, "清单中的备份不存在，未还原任何文件"
     asyncio.create_task(
         db.maintain_log(
             kind="rollback",
